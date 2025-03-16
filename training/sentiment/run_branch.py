@@ -1,5 +1,5 @@
 if __name__ == "__main__":
-    from transformers import AutoTokenizer, Gemma3ForCausalLM
+    from transformers import AutoTokenizer
     from utils import get_dataloader, train
 
     from nn.branch import Gemma3WithBranch
