@@ -8,6 +8,8 @@ from transformers.models.gemma3.modeling_gemma import Gemma3ForCausalLM
 @dataclass
 class CausalLMAndBranchOutputWithPast:
     loss: Optional[torch.FloatTensor] = None
+    loss_backbone: Optional[torch.FloatTensor] = None
+    loss_branch: Optional[torch.FloatTensor] = None
     logits: torch.FloatTensor = None
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
@@ -16,19 +18,27 @@ class CausalLMAndBranchOutputWithPast:
 
 
 class Gemma3WithBranch(Gemma3ForCausalLM):
-    def __init__(self, config, branch_hidden_size=128, branch_output_size=3):
+    def __init__(
+        self, config, branch_hidden_size=256, branch_output_size=3, dropout_rate=0.2
+    ):
         super().__init__(config)
 
         # 1) まず全パラメータを freeze
         for param in self.parameters():
             param.requires_grad = False
 
-        # 2) branch を定義
+        # 2) branch を定義 - より深いネットワークと dropout を追加
         hidden_size = self.model.config.hidden_size
         self.branch = torch.nn.Sequential(
             torch.nn.Linear(hidden_size, branch_hidden_size),
+            torch.nn.LayerNorm(branch_hidden_size),
             torch.nn.ReLU(),
-            torch.nn.Linear(branch_hidden_size, branch_output_size),
+            torch.nn.Dropout(dropout_rate),
+            torch.nn.Linear(branch_hidden_size, branch_hidden_size // 2),
+            torch.nn.LayerNorm(branch_hidden_size // 2),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(dropout_rate),
+            torch.nn.Linear(branch_hidden_size // 2, branch_output_size),
         )
 
         # 3) branch のみ学習を有効化
@@ -125,7 +135,8 @@ class Gemma3WithBranch(Gemma3ForCausalLM):
             loss_branch = loss_fn(branch_logits_reshaped, branch_labels_reshaped)
 
         if loss_backbone is not None and loss_branch is not None:
-            loss = loss_backbone + loss_branch
+            # branchの損失に5倍の重みを付ける
+            loss = loss_backbone + 5.0 * loss_branch
         elif loss_backbone is not None:
             loss = loss_backbone
         elif loss_branch is not None:
@@ -138,6 +149,8 @@ class Gemma3WithBranch(Gemma3ForCausalLM):
         # CausalLMAndBranchOutputWithPast は branch_logits を保持可能
         return CausalLMAndBranchOutputWithPast(
             loss=loss,
+            loss_backbone=loss_backbone,
+            loss_branch=loss_branch,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,

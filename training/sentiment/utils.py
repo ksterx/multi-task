@@ -76,13 +76,23 @@ class TextWithTokenSentimentDataset(Dataset):
 
 def get_dataloader(tokenizer, batch_size=2, max_length=2048):
     train_dataset = load_dataset("mteb/tweet_sentiment_extraction", split="train")
-    test_dataset = load_dataset("mteb/tweet_sentiment_extraction", split="test")
+    test_dataset = load_dataset("mteb/tweet_sentiment_extraction", split="test[:100]")
 
     train_texts = train_dataset["text"]
-    train_token_sentiments = [[s] for s in train_dataset["label"]]
+    # 各テキストの単語数を概算し、すべての単語に同じラベルを適用
+    train_token_sentiments = []
+    for text, label in zip(train_texts, train_dataset["label"]):
+        # 単語数を空白で分割して概算
+        word_count = len(text.split())
+        # 各単語に同じラベルを適用
+        train_token_sentiments.append([label] * word_count)
 
     test_texts = test_dataset["text"]
-    test_token_sentiments = [[s] for s in test_dataset["label"]]
+    # テストデータも同様に処理
+    test_token_sentiments = []
+    for text, label in zip(test_texts, test_dataset["label"]):
+        word_count = len(text.split())
+        test_token_sentiments.append([label] * word_count)
 
     # データセット & データローダ
     train_dataset = TextWithTokenSentimentDataset(
@@ -119,12 +129,23 @@ def train(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    # AdamWオプティマイザを使用し、重み減衰を追加
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+
+    # 学習率スケジューラを追加
+    total_steps = len(train_loader) * num_epochs
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=lr,
+        total_steps=total_steps,
+        pct_start=0.1,
+        anneal_strategy="cos",
+    )
 
     global_step = 0
     best_eval_loss = float("inf")
 
-    for _ in trange(num_epochs):
+    for epoch in trange(num_epochs):
         model.train()
         total_loss = 0.0
         total_lm_loss = 0.0
@@ -150,20 +171,18 @@ def train(
             )
             loss = outputs.loss
 
-            loss_lm = (
-                outputs.loss_backbone
-                if hasattr(outputs, "loss_backbone")
-                else torch.tensor(0.0)
-            )
-            loss_branch = (
-                outputs.loss_branch
-                if hasattr(outputs, "loss_branch")
-                else torch.tensor(0.0)
-            )
+            # 損失値を直接取得
+            loss_lm = outputs.loss_backbone
+            loss_branch = outputs.loss_branch
 
             # Backward & update
             loss.backward()
+
+            # 勾配クリッピングを追加
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             optimizer.step()
+            scheduler.step()
 
             total_loss += loss.item()
             total_lm_loss += loss_lm.item()
@@ -178,6 +197,7 @@ def train(
                         "Train/Step Loss": loss.item(),
                         "Train/Step LM Loss": loss_lm.item(),
                         "Train/Step Branch Loss": loss_branch.item(),
+                        "Train/Learning Rate": scheduler.get_last_lr()[0],
                     }
                 )
 
@@ -191,10 +211,28 @@ def train(
                 # モデルを保存（Eval Loss が最小の場合のみ保存）
                 if avg_eval_loss < best_eval_loss:
                     best_eval_loss = avg_eval_loss
-                    model.save_pretrained(save_path + f"step_{global_step}")
+                    model.save_pretrained(
+                        os.path.join(save_path, f"step_{global_step}")
+                    )
                     print(
                         f"✅ Model saved at step {global_step} with Eval Loss {best_eval_loss:.4f}"
                     )
+
+        # エポック終了時の平均損失を記録
+        avg_epoch_loss = total_loss / len(train_loader)
+        avg_epoch_lm_loss = total_lm_loss / len(train_loader)
+        avg_epoch_branch_loss = total_branch_loss / len(train_loader)
+
+        wandb.log(
+            {
+                "Train/Epoch Loss": avg_epoch_loss,
+                "Train/Epoch LM Loss": avg_epoch_lm_loss,
+                "Train/Epoch Branch Loss": avg_epoch_branch_loss,
+                "Train/Epoch": epoch,
+            }
+        )
+
+        print(f"Epoch {epoch} completed. Avg Loss: {avg_epoch_loss:.4f}")
 
 
 def evaluate(model, eval_loader, device, save_path, global_step):
@@ -221,16 +259,10 @@ def evaluate(model, eval_loader, device, save_path, global_step):
                 return_dict=True,
             )
             loss = outputs.loss
-            loss_lm = (
-                outputs.loss_backbone
-                if hasattr(outputs, "loss_backbone")
-                else torch.tensor(0.0)
-            )
-            loss_branch = (
-                outputs.loss_branch
-                if hasattr(outputs, "loss_branch")
-                else torch.tensor(0.0)
-            )
+
+            # 評価時も同様に直接取得
+            loss_lm = outputs.loss_backbone
+            loss_branch = outputs.loss_branch
 
             total_eval_loss += loss.item()
             total_eval_lm_loss += loss_lm.item()
@@ -272,6 +304,6 @@ def evaluate(model, eval_loader, device, save_path, global_step):
         }
     )
 
-    model.save_pretrained(save_path + f"step_{global_step}")
+    model.save_pretrained(os.path.join(save_path, f"step_{global_step}"))
 
     return avg_eval_loss
