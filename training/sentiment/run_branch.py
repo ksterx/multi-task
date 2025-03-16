@@ -18,5 +18,5 @@ if __name__ == "__main__":
         save_path="./",
         log_steps=100,
         eval_and_save_steps=500,
-        num_epochs=10,
+        num_epochs=2,
     )

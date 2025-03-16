@@ -112,29 +112,18 @@ def train(
     log_steps=100,
     eval_and_save_steps=500,
     num_epochs=10,
+    lr=1e-5,
 ):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
-    best_eval_loss = float("inf")
-
-    for epoch in range(num_epochs):
-        model.train()
-
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    wandb.init(project="multi-task", name="gemma3", entity="ksterx")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
 
     global_step = 0
+    best_eval_loss = float("inf")
 
-    num_epochs = 5
     for _ in trange(num_epochs):
         model.train()
         total_loss = 0.0
@@ -202,7 +191,7 @@ def train(
                 # モデルを保存（Eval Loss が最小の場合のみ保存）
                 if avg_eval_loss < best_eval_loss:
                     best_eval_loss = avg_eval_loss
-                    torch.save(model.state_dict(), save_path)
+                    model.save_pretrained(save_path + f"step_{global_step}")
                     print(
                         f"✅ Model saved at step {global_step} with Eval Loss {best_eval_loss:.4f}"
                     )
