@@ -38,7 +38,7 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # バッチサイズを小さく設定
-    train_loader, eval_loader = get_dataloader(tokenizer, batch_size=4, max_length=1024)
+    train_loader, eval_loader = get_dataloader(tokenizer, batch_size=8, max_length=1024)
 
     # オプティマイザの設定
     optimizer = torch.optim.AdamW(

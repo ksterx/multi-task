@@ -108,39 +108,40 @@ def train(
         epoch_iterator = tqdm(train_loader, desc="Train Iter")
 
         for step, batch in enumerate(epoch_iterator):
-            with accelerator.accumulate(model):
-                batch = {k: v.to(device) for k, v in batch.items()}
+            # with accelerator.accumulate(model):
+            batch = {k: v.to(device) for k, v in batch.items()}
 
-                outputs = model(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                    labels=batch["labels"],
+            outputs = model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                labels=batch["labels"],
+            )
+
+            loss = outputs.loss
+            accelerator.backward(loss)
+
+            if (step + 1) % log_steps == 0:
+                wandb.log(
+                    {
+                        "train/loss": loss.item(),
+                        "train/loss_head1": outputs.loss_head1.item(),
+                        "train/loss_head2": outputs.loss_head2.item(),
+                    },
+                    step=global_step,
                 )
 
-                loss = outputs.loss
-                accelerator.backward(loss)
-
-                if (step + 1) % log_steps == 0:
-                    wandb.log(
-                        {
-                            "train/loss": loss.item(),
-                            "train/loss_head1": outputs.loss_head1.item(),
-                            "train/loss_head2": outputs.loss_head2.item(),
-                        },
-                        step=global_step,
-                    )
-
+            if (step + 1) % accelerator.gradient_accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
 
-                global_step += 1
+            global_step += 1
 
-                if global_step % eval_and_save_steps == 0:
-                    evaluate(model, eval_loader, device, save_path, global_step)
-                    if accelerator and accelerator.is_main_process:
-                        accelerator.save_state(f"{save_path}/checkpoint-{global_step}")
-                    elif not accelerator:
-                        model.save_pretrained(f"{save_path}/checkpoint-{global_step}")
+            if global_step % eval_and_save_steps == 0:
+                evaluate(model, eval_loader, device, save_path, global_step)
+                if accelerator and accelerator.is_main_process:
+                    accelerator.save_state(f"{save_path}/checkpoint-{global_step}")
+                elif not accelerator:
+                    model.save_pretrained(f"{save_path}/checkpoint-{global_step}")
 
     wandb.finish()
 
