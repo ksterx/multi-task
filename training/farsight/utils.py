@@ -1,8 +1,6 @@
 import torch
-import torch.optim as optim
 import wandb
 from datasets import load_dataset
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm, trange
 import os
@@ -56,8 +54,8 @@ def get_dataloader(tokenizer, batch_size=2, max_length=32, n=5):
         return {
             "text": tokenizer.apply_chat_template([{"role": "user", "content": example["question"]}, {"role": "assistant", "content": example["reference_answer"]}], tokenize=False)
         }
-    dataset = load_dataset("facebook/natural_reasoning", split="train[:20]").map(apply_chat_format)
-    dataset = dataset.train_test_split(test_size=10)
+    dataset = load_dataset("facebook/natural_reasoning", split="train").map(apply_chat_format)
+    dataset = dataset.train_test_split(test_size=100)
     train_dataset = dataset["train"]
     test_dataset  = dataset["test"]
 
@@ -85,130 +83,66 @@ def train(
     model,
     train_loader,
     eval_loader,
-    save_path="./",
-    log_steps=100,
-    eval_and_save_steps=500,
-    num_epochs=3,
-    lr=1e-5,
+    accelerator,
+    optimizer,
+    save_path,
+    log_steps,
+    eval_and_save_steps,
+    num_epochs=1,
 ):
     """
-    next-token (LM) loss + n-step先予測 loss を合算して学習。
+    モデルの学習を行う関数
     """
-    wandb.init(project="multi-task", name="gemma2_n_step_pred", entity="ksterx")
+    os.makedirs(save_path, exist_ok=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    # optimizerはすでにaccelerator.prepareで準備済み
+    device = accelerator.device
 
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
-
-    total_steps = len(train_loader) * num_epochs
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=lr,
-        total_steps=total_steps,
-        pct_start=0.1,
-        anneal_strategy="cos",
-    )
+    wandb.init(project="farsight", name="multi-head-training")
 
     global_step = 0
-    best_eval_loss = float("inf")
+    progress_bar = trange(num_epochs, desc="Epoch")
 
-    for epoch in trange(num_epochs, desc="Epoch"):
+    for epoch in progress_bar:
         model.train()
-        total_loss = 0.0
-        total_lm_loss = 0.0
-        total_n_step_loss = 0.0
+        epoch_iterator = tqdm(train_loader, desc="Train Iter")
 
-        for batch in tqdm(train_loader, desc="Train Iter"):
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)            # next-token 用
-            n_step_labels = batch["n_step_labels"].to(device)  # n-step先
+        for step, batch in enumerate(epoch_iterator):
+            with accelerator.accumulate(model):
+                batch = {k: v.to(device) for k, v in batch.items()}
 
-            optimizer.zero_grad()
-
-            # モデルの forward:
-            #  カスタムモデルであれば、n_step_labels を引数にして2つのロスを返すようにする
-            #  例:
-            #  outputs = model(
-            #      input_ids=input_ids,
-            #      attention_mask=attention_mask,
-            #      labels=labels,
-            #      n_step_labels=n_step_labels,
-            #      return_dict=True,
-            #  )
-            #
-            # 以下は「lm_loss」「n_step_loss」「loss」を全部返す想定。
-            # ここではデモなので、その処理を想定して書きます。
-
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-                n_step_labels=n_step_labels,  # カスタム引数
-                return_dict=True,
-            )
-
-            # トータルロス + 個別ロスを取得
-            loss = outputs.loss
-            lm_loss = outputs.lm_loss
-            n_step_loss = outputs.n_step_loss
-
-            # n_step_loss に重みをかけたい場合、モデル内部ではなくここで合算してもOK
-            # loss = lm_loss + n_step_loss_weight * n_step_loss
-
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
-            optimizer.step()
-            scheduler.step()
-
-            total_loss += loss.item()
-            total_lm_loss += lm_loss.item()
-            total_n_step_loss += n_step_loss.item()
-
-            global_step += 1
-
-            if global_step % log_steps == 0:
-                wandb.log(
-                    {
-                        "Train/Step Total Loss": loss.item(),
-                        "Train/Step LM Loss": lm_loss.item(),
-                        "Train/Step N-step Loss": n_step_loss.item(),
-                        "Train/Learning Rate": scheduler.get_last_lr()[0],
-                    },
-                    step=global_step,
+                outputs = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    labels=batch["labels"],
                 )
 
-            # eval & save
-            if global_step % eval_and_save_steps == 0 and global_step > 0:
-                avg_eval_loss = evaluate(
-                    model, eval_loader, device, save_path, global_step
-                )
-                print(f"[Eval] Step {global_step}, Loss: {avg_eval_loss:.4f}")
+                loss = outputs.loss
+                accelerator.backward(loss)
 
-                if avg_eval_loss < best_eval_loss:
-                    best_eval_loss = avg_eval_loss
-                    model.save_pretrained(os.path.join(save_path, f"step_{global_step}"))
-                    print(f"Best model saved at step {global_step}")
+                if (step + 1) % log_steps == 0:
+                    wandb.log(
+                        {
+                            "train/loss": loss.item(),
+                            "train/loss_head1": outputs.loss_head1.item(),
+                            "train/loss_head2": outputs.loss_head2.item(),
+                        },
+                        step=global_step,
+                    )
 
-        avg_epoch_loss = total_loss / len(train_loader)
-        avg_epoch_lm_loss = total_lm_loss / len(train_loader)
-        avg_epoch_n_step_loss = total_n_step_loss / len(train_loader)
+                optimizer.step()
+                optimizer.zero_grad()
 
-        wandb.log(
-            {
-                "Train/Epoch Total Loss": avg_epoch_loss,
-                "Train/Epoch LM Loss": avg_epoch_lm_loss,
-                "Train/Epoch N-step Loss": avg_epoch_n_step_loss,
-                "Train/Epoch": epoch,
-            },
-            step=global_step,
-        )
+                global_step += 1
 
-        print(
-            f"Epoch {epoch} done. Total Loss: {avg_epoch_loss:.4f}, LM: {avg_epoch_lm_loss:.4f}, N-step: {avg_epoch_n_step_loss:.4f}"
-        )
+                if global_step % eval_and_save_steps == 0:
+                    evaluate(model, eval_loader, device, save_path, global_step)
+                    if accelerator and accelerator.is_main_process:
+                        accelerator.save_state(f"{save_path}/checkpoint-{global_step}")
+                    elif not accelerator:
+                        model.save_pretrained(f"{save_path}/checkpoint-{global_step}")
+
+    wandb.finish()
 
 
 def evaluate(model, eval_loader, device, save_path, global_step):

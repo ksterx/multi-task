@@ -62,11 +62,8 @@ declare -a CONTAINER_OPTIONS=(
 echo "Starting training..."
 srun -l "${CONTAINER_OPTIONS[@]}" \
     accelerate launch \
-        --num_processes 4 \
-        --num_machines $SLURM_NNODES \
         --rdzv_backend c10d \
         --main_process_ip $MASTER_ADDR \
         --main_process_port $MASTER_PORT \
-        --multi_gpu \
         $HOME/workspace/multi-task/training/farsight/run_branch.py
 echo "Training completed."
