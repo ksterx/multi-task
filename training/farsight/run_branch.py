@@ -23,7 +23,7 @@ if __name__ == "__main__":
         model_name,
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
-        use_cache=False  # 訓練時はキャッシュを無効化
+        use_cache=False,  # 訓練時はキャッシュを無効化
     )
 
     # メモリ効率化のための設定
@@ -31,9 +31,15 @@ if __name__ == "__main__":
 
     if accelerator.is_main_process:
         # print trainable parameters
-        print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-        print(f"Head 1 parameters: {sum(p.numel() for p in model.lm_head.parameters() if p.requires_grad)}")
-        print(f"Head 2 parameters: {sum(p.numel() for p in model.lm_head2.parameters() if p.requires_grad)}")
+        print(
+            f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}"
+        )
+        print(
+            f"Head 1 parameters: {sum(p.numel() for p in model.lm_head.parameters() if p.requires_grad)}"
+        )
+        print(
+            f"Head 2 parameters: {sum(p.numel() for p in model.lm_head2.parameters() if p.requires_grad)}"
+        )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
