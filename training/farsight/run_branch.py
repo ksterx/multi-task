@@ -4,7 +4,6 @@ if __name__ == "__main__":
     import torch
     from nn.branch import Gemma2ForMultiHeadCausalLM
     from accelerate import Accelerator
-    from accelerate.utils import DummyOptim, DummyScheduler
 
     # Acceleratorの初期化（DeepSpeed設定を使用）
     accelerator = Accelerator(
